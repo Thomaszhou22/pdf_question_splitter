@@ -100,8 +100,8 @@ export default function App() {
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
       const totalPages = pdf.numPages
 
-      const allSegments: { canvas: HTMLCanvasElement }[] = []
-      const scale = 2 // High resolution for quality
+      const segmentDataUrls: string[] = []
+      const scale = 2
 
       for (let i = 1; i <= totalPages; i++) {
         setProgress(strings.pageProgress.replace('{n}', String(i)).replace('{total}', String(totalPages)))
@@ -128,73 +128,81 @@ export default function App() {
           if (!text) continue
           if (qNumPattern.test(text)) {
             const y = (item as any).transform[5]
-            questionNumberYs.push(y * scale) // scale to canvas coords
+            questionNumberYs.push(y * scale)
           }
         }
 
+        // Determine split points
+        const splitYs: number[] = [0]
         if (linePositions.length === 0) {
-          // No lines found on this page, treat entire page as one question
-          allSegments.push({ canvas })
+          splitYs.push(canvas.height)
         } else {
-          // Cross-validate: keep only lines that have a question number nearby
-          const validatedLines = linePositions.filter(lineY => {
-            // Check if there's a question number within a reasonable range above the line
-            return questionNumberYs.some(numY => {
-              const dist = lineY - numY
-              return dist > -10 && dist < 100 // number slightly above to well below the line
-            })
-          })
-
-          // If validation eliminates all lines, fall back to all detected lines
+          const validatedLines = linePositions.filter(lineY =>
+            questionNumberYs.some(numY => lineY - numY > -10 && lineY - numY < 100)
+          )
           const finalLines = validatedLines.length > 0 ? validatedLines : linePositions
-
-          // Split at each validated line
-          const splitPoints = [0, ...finalLines, canvas.height]
-          for (let j = 0; j < splitPoints.length - 1; j++) {
-            const startY = splitPoints[j]
-            const endY = splitPoints[j + 1]
-            const segHeight = endY - startY
-
-            // Skip tiny segments (likely noise or just the line itself)
-            if (segHeight < 50) continue
-
-            const segCanvas = document.createElement('canvas')
-            segCanvas.width = canvas.width
-            segCanvas.height = segHeight
-            const segCtx = segCanvas.getContext('2d')!
-            segCtx.drawImage(canvas, 0, startY, canvas.width, segHeight, 0, 0, canvas.width, segHeight)
-            allSegments.push({ canvas: segCanvas })
-          }
+          splitYs.push(...finalLines, canvas.height)
         }
+
+        // Create segment images and immediately release
+        for (let j = 0; j < splitYs.length - 1; j++) {
+          const startY = splitYs[j]
+          const segHeight = splitYs[j + 1] - startY
+          if (segHeight < 50) continue
+
+          const segCanvas = document.createElement('canvas')
+          segCanvas.width = canvas.width
+          segCanvas.height = segHeight
+          const segCtx = segCanvas.getContext('2d')!
+          segCtx.drawImage(canvas, 0, startY, canvas.width, segHeight, 0, 0, canvas.width, segHeight)
+          segmentDataUrls.push(segCanvas.toDataURL('image/jpeg', 0.92))
+          segCanvas.width = 0; segCanvas.height = 0 // release memory
+        }
+
+        // Release full page canvas
+        canvas.width = 0; canvas.height = 0
+        page.cleanup()
+
+        // Yield to UI every 5 pages
+        if (i % 5 === 0) await new Promise(r => setTimeout(r, 0))
       }
 
-      if (allSegments.length === 0) {
+      pdf.destroy()
+
+      if (segmentDataUrls.length === 0) {
         setNoLinesWarning(true)
         setProcessing(false)
         return
       }
 
-      // Create preview images
-      const images = allSegments.map(seg => seg.canvas.toDataURL('image/jpeg', 0.85))
-      setQuestionImages(images)
+      setQuestionImages(segmentDataUrls)
       setPreviewIndex(0)
 
       // Generate output PDF
+      setProgress(lang === 'zh' ? '正在生成 PDF...' : 'Generating PDF...')
+      const firstImg = new Image()
+      firstImg.src = segmentDataUrls[0]
+      await new Promise(r => { firstImg.onload = r })
+
       const outputPdf = new jsPDF({
-        orientation: allSegments[0].canvas.width > allSegments[0].canvas.height ? 'landscape' : 'portrait',
+        orientation: firstImg.width > firstImg.height ? 'landscape' : 'portrait',
         unit: 'px',
-        format: [allSegments[0].canvas.width, allSegments[0].canvas.height],
+        format: [firstImg.width, firstImg.height],
       })
 
-      allSegments.forEach((seg, idx) => {
+      for (let idx = 0; idx < segmentDataUrls.length; idx++) {
         if (idx > 0) {
-          const w = seg.canvas.width
-          const h = seg.canvas.height
-          outputPdf.addPage([w, h], w > h ? 'landscape' : 'portrait')
+          const img = new Image()
+          img.src = segmentDataUrls[idx]
+          await new Promise(r => { img.onload = r })
+          outputPdf.addPage([img.width, img.height], img.width > img.height ? 'landscape' : 'portrait')
+          outputPdf.addImage(segmentDataUrls[idx], 'JPEG', 0, 0, img.width, img.height)
+        } else {
+          outputPdf.addImage(segmentDataUrls[idx], 'JPEG', 0, 0, firstImg.width, firstImg.height)
         }
-        const imgData = seg.canvas.toDataURL('image/jpeg', 0.95)
-        outputPdf.addImage(imgData, 'JPEG', 0, 0, seg.canvas.width, seg.canvas.height)
-      })
+        // Yield every 20 segments
+        if (idx % 20 === 0) await new Promise(r => setTimeout(r, 0))
+      }
 
       resultPdfRef.current = outputPdf.output('blob')
       setDone(true)
