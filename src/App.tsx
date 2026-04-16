@@ -119,12 +119,37 @@ export default function App() {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
         const linePositions = detectSeparatorLines(imageData, sens)
 
+        // Extract text to find question numbers for validation
+        const textContent = await page.getTextContent()
+        const questionNumberYs: number[] = []
+        const qNumPattern = /^\s*(\d+)\s*$/
+        for (const item of textContent.items) {
+          const text = (item as any).str?.trim()
+          if (!text) continue
+          if (qNumPattern.test(text)) {
+            const y = (item as any).transform[5]
+            questionNumberYs.push(y * scale) // scale to canvas coords
+          }
+        }
+
         if (linePositions.length === 0) {
           // No lines found on this page, treat entire page as one question
           allSegments.push({ canvas })
         } else {
-          // Split at each line
-          const splitPoints = [0, ...linePositions, canvas.height]
+          // Cross-validate: keep only lines that have a question number nearby
+          const validatedLines = linePositions.filter(lineY => {
+            // Check if there's a question number within a reasonable range above the line
+            return questionNumberYs.some(numY => {
+              const dist = lineY - numY
+              return dist > -10 && dist < 100 // number slightly above to well below the line
+            })
+          })
+
+          // If validation eliminates all lines, fall back to all detected lines
+          const finalLines = validatedLines.length > 0 ? validatedLines : linePositions
+
+          // Split at each validated line
+          const splitPoints = [0, ...finalLines, canvas.height]
           for (let j = 0; j < splitPoints.length - 1; j++) {
             const startY = splitPoints[j]
             const endY = splitPoints[j + 1]
