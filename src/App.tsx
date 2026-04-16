@@ -101,12 +101,16 @@ export default function App() {
       const totalPages = pdf.numPages
 
       const segmentDataUrls: string[] = []
-      const scale = 2
+      const baseScale = 2
 
       for (let i = 1; i <= totalPages; i++) {
         setProgress(strings.pageProgress.replace('{n}', String(i)).replace('{total}', String(totalPages)))
 
         const page = await pdf.getPage(i)
+        const testViewport = page.getViewport({ scale: baseScale })
+        // Limit canvas to ~16MP to prevent OOM on large pages
+        const maxDim = 4000
+        const scale = Math.min(baseScale, maxDim / testViewport.width, maxDim / testViewport.height)
         const viewport = page.getViewport({ scale })
         const canvas = document.createElement('canvas')
         canvas.width = viewport.width
@@ -114,6 +118,21 @@ export default function App() {
         const ctx = canvas.getContext('2d')!
 
         await page.render({ canvasContext: ctx, viewport, canvas }).promise
+
+        // Verify canvas is not blank (all white/transparent)
+        const renderedData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+        let hasContent = false
+        for (let k = 3; k < renderedData.length; k += 4) {
+          if (renderedData[k] > 0) { hasContent = true; break }
+        }
+        if (!hasContent) {
+          console.warn(`Page ${i} rendered blank, retrying with scale 1.5`)
+          // Retry with lower scale to save memory
+          const retryViewport = page.getViewport({ scale: 1.5 })
+          canvas.width = retryViewport.width
+          canvas.height = retryViewport.height
+          await page.render({ canvasContext: ctx, viewport: retryViewport, canvas }).promise
+        }
 
         // Detect separator lines
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
