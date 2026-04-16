@@ -4,7 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 import { jsPDF } from 'jspdf'
 
 // PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
 
 type Lang = 'en' | 'zh'
 
